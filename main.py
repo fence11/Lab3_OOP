@@ -1,77 +1,118 @@
-import hashlib
-import time
-import json
 import os
+import hashlib
+import json
+from datetime import datetime
 
 
-def calculate_file_hash(file_path):
-    """Calculate the SHA-256 hash of a file."""
-    try:
-        with open(file_path, "rb") as f:
-            file_content = f.read()
-            return hashlib.sha256(file_content).hexdigest()
-    except (IOError, FileNotFoundError) as e:
-        print(f"Error reading file: {e}")
-        return None
+class FileSnapshot:
+    def __init__(self, path, hash_value=None, last_modified=None):
+        self.path = path
+        self.hash = hash_value or self.compute_hash()
+        self.last_modified = last_modified or os.path.getmtime(path)
+
+    def compute_hash(self):
+        try:
+            with open(self.path, "rb") as file:
+                file_content = file.read()
+                return hashlib.sha256(file_content).hexdigest()
+        except (IOError, FileNotFoundError) as e:
+            print(f"Error reading file: {e}")
+            return None
+
+    def compare(self, other):
+        if self.hash != other.hash:
+            return "Change detected"
+        return "No change"
+
+    def to_dict(self):
+        return {
+            "path": self.path,
+            "hash": self.hash,
+            "last_modified": self.last_modified,
+        }
+
+    @staticmethod
+    def from_dict(data):
+        return FileSnapshot(data["path"], data["hash"], data["last_modified"])
 
 
-def save_hash_to_json(file_path, hash_file):
-    """Save the hash of a file to a JSON file."""
-    file_hash = calculate_file_hash(file_path)
-    if file_hash is None:
-        return
+class FolderMonitor:
+    SNAPSHOT_FILE = "folder_snapshot.json"
 
-    # Check if the JSON file exists, otherwise initialize an empty dictionary
-    if os.path.exists(hash_file):
-        with open(hash_file, "r") as f:
-            hashes = json.load(f)
-    else:
-        hashes = {}
+    def __init__(self, folder_path):
+        self.folder_path = folder_path
+        self.snapshots = {}
+        self.load_snapshots()
 
-    # Update the JSON data with the new hash
-    hashes[file_path] = file_hash
-    with open(hash_file, "w") as f:
-        json.dump(hashes, f, indent=4)
-    print(f"Hash saved for {file_path}: {file_hash}")
+    def load_snapshots(self):
+        if os.path.exists(self.SNAPSHOT_FILE):
+            with open(self.SNAPSHOT_FILE, "r") as file:
+                data = json.load(file)
+                self.snapshots = {
+                    path: FileSnapshot.from_dict(snap) for path, snap in data.items()
+                }
 
+    def save_snapshots(self):
+        with open(self.SNAPSHOT_FILE, "w") as file:
+            json.dump(
+                {path: snap.to_dict() for path, snap in self.snapshots.items()},
+                file,
+                indent=4,
+            )
 
-def detect_file_changes(file_path, hash_file):
-    """Detect changes in a file based on its hash stored in a JSON file."""
-    # Load the stored hashes
-    if os.path.exists(hash_file):
-        with open(hash_file, "r") as f:
-            hashes = json.load(f)
-    else:
-        hashes = {}
+    def take_snapshot(self):
+        snapshots = {}
+        for file_name in os.listdir(self.folder_path):
+            file_path = os.path.join(self.folder_path, file_name)
+            if os.path.isfile(file_path):
+                snapshots[file_name] = FileSnapshot(file_path)
+        self.snapshots = snapshots
 
-    # Get the last stored hash
-    last_hash = hashes.get(file_path)
-    print(f"Initial hash from JSON: {last_hash}")
+    def detect_changes(self):
+        current_snapshots = {}
+        changes = {}
 
-    while True:
-        current_hash = calculate_file_hash(file_path)
-        print(f"Current hash: {current_hash}")
+        for file_name in os.listdir(self.folder_path):
+            file_path = os.path.join(self.folder_path, file_name)
+            if os.path.isfile(file_path):
+                current_snapshots[file_name] = FileSnapshot(file_path)
 
-        if current_hash != last_hash:
-            print("File has changed!")
-            save_hash_to_json(file_path, hash_file)
-            break
+        for file_name, snapshot in current_snapshots.items():
+            if file_name not in self.snapshots:
+                changes[file_name] = "New file"
+            else:
+                changes[file_name] = snapshot.compare(self.snapshots[file_name])
 
-        time.sleep(1)
+        for file_name in self.snapshots:
+            if file_name not in current_snapshots:
+                changes[file_name] = "File deleted"
+
+        return changes
+
+    def display_changes(self, changes):
+        snapshot_time = datetime.now().strftime("%d/%m/%Y; %H:%M:%S.%f")[:-3]
+        print(f"Last snapshot created at: {snapshot_time}")
+        for file_name, status in changes.items():
+            print(f"{file_name} - {status}")
 
 
 if __name__ == "__main__":
-    hash_file_path = "file_hashes.json"
-    file_to_monitor = "testing_files/sample.md"
+    folder_path = "testing_files"
 
-    # Save initial hash if it doesn't exist in the JSON
-    save_hash_to_json(file_to_monitor, hash_file_path)
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Checking folder: {folder_path}")
 
-    # Start monitoring for changes
-    detect_file_changes(file_to_monitor, hash_file_path)
+    if not os.path.exists(folder_path):
+        print(f"Error: Folder '{folder_path}' does not exist.")
+        exit(1)
 
+    monitor = FolderMonitor(folder_path)
 
-## not desired outcome
-# program starts > file is being read > if file is modified DURING program runtime 
-# > change is caught and program stops
-# however now saves in json file
+    print("Checking folder for changes...")
+    changes = monitor.detect_changes()
+    monitor.display_changes(changes)
+
+    print("\nUpdating snapshot...")
+    monitor.take_snapshot()
+    monitor.save_snapshots()
+    print("Snapshot updated.")
